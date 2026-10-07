@@ -44,6 +44,25 @@ The app asks for keys the first time it needs them and saves them to `~/.hedge-f
 
 Keys exported in your shell always win over the saved file.
 
+### Run it free and local (no API keys)
+
+Two settings swap both paid services for free local ones:
+
+```bash
+pip install yfinance            # Yahoo Finance data
+ollama pull qwen3:8b            # a local model, served by Ollama at localhost:11434
+
+export HEDGE_FUND_DATA=yfinance             # instead of Financial Datasets
+export HEDGE_FUND_LLM_MODEL=ollama/qwen3:8b # any Ollama model: ollama/<name>
+aihf
+```
+
+`OLLAMA_BASE_URL` points at a different Ollama server. The trade-offs, in short: Yahoo has about five
+quarters and four fiscal years of statements (so snapshots hold 4-6 periods, not 20) and no SEC filing
+dates (the earnings-report date stands in), so long backtests are less point-in-time than with
+Financial Datasets. A small local model also reasons less well than a frontier model. See
+`hedge_fund/data/yfinance_client.py` for the details.
+
 ## How to Run
 
 ### Interactive app

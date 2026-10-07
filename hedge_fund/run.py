@@ -48,7 +48,8 @@ from pathlib import Path
 from rich.console import Console
 
 from hedge_fund.backtesting import backtest_fund
-from hedge_fund.data import CachedDataClient, FDClient
+from hedge_fund.data import CachedDataClient
+from hedge_fund.data.factory import make_raw_client
 from hedge_fund.data.sessions import completed_through
 from hedge_fund.fund import Fund, load_spec, normalize_universe
 from hedge_fund.paper import (
@@ -193,7 +194,7 @@ def _backtest(args, parser: argparse.ArgumentParser, console: Console) -> None:
     # did over the window, and that memory would otherwise score as skill.
     fund = Fund(spec, blind=True)
 
-    with FDClient() as raw:
+    with make_raw_client() as raw:
         fd = CachedDataClient(raw)
         with console.status(
             f"[cyan]{spec.name}: backtesting {start} → {end} "
@@ -254,7 +255,7 @@ def _paper(args, parser: argparse.ArgumentParser, console: Console) -> None:
 
     if args.action == "tick":
         deployed = load_deployed(directory)
-        with FDClient() as raw:
+        with make_raw_client() as raw:
             fd = CachedDataClient(raw)
             verb = "running the latest session again" if args.again else "advancing one session"
             with console.status(

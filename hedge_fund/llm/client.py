@@ -29,6 +29,7 @@ from hedge_fund.llm import contract
 from hedge_fund.llm.registry import (
     env_var_for,
     is_supported,
+    OLLAMA_PREFIX,
     provider_for,
     SUPPORTED_PROVIDERS,
 )
@@ -246,7 +247,7 @@ def make_llm(
             f"Supported: {', '.join(sorted(SUPPORTED_PROVIDERS))}."
         )
 
-    api_key = _require_key(provider)
+    api_key = None if provider == "Ollama" else _require_key(provider)
 
     if provider == "TypeSafe":
         # Typed judgments have no generated tokens or output-token budget.
@@ -272,6 +273,14 @@ def make_llm(
         from langchain_xai import ChatXAI
         chat = ChatXAI(model=model, api_key=api_key, timeout=timeout,
                        max_retries=1)
+    elif provider == "Ollama":
+        # Ollama speaks the OpenAI wire format at /v1. Local models are slow
+        # on a single consumer GPU, so allow a long timeout.
+        from langchain_openai import ChatOpenAI
+        base = (os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+        chat = ChatOpenAI(model=model.removeprefix(OLLAMA_PREFIX), api_key="ollama",
+                          base_url=f"{base}/v1", timeout=max(timeout, 600.0),
+                          max_retries=1, max_tokens=max_tokens, temperature=0)
     elif provider == "Kimi":
         # Moonshot speaks the OpenAI wire format. Default to the international
         # host; mainland users override with MOONSHOT_BASE_URL (v1 does the same).
@@ -336,6 +345,9 @@ def extract_json(text: str) -> dict:
     Tries: ```json fence -> whole string -> first balanced {...} block.
     Raises LLMParseError if nothing parses.
     """
+    # Reasoning models served locally (qwen3, deepseek-r1 on Ollama) put
+    # their thinking inside <think>...</think>; braces in there are not the answer.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence:
         try:
