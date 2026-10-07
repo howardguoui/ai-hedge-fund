@@ -194,3 +194,57 @@ def test_paper_flow_create_tick_status_halt_resume(tmp_path, monkeypatch, capsys
     with pytest.raises(SystemExit) as exc:
         _main(monkeypatch, "paper", "status", "nobody")
     assert exc.value.code == 2 and "no paper fund named 'nobody'" in capsys.readouterr().err
+
+
+def test_signals_prints_each_analysts_view_and_a_panel_score(tmp_path, monkeypatch, capsys):
+    from hedge_fund.models import Signal
+
+    def analyst(name, views):
+        class Fake:
+            def __init__(self):
+                self.name = name
+
+            def predict(self, ticker, date, data):
+                v = views.get(ticker)
+                if v is None:
+                    return Signal(model_name=name, ticker=ticker, date=date, value=0.0,
+                                  reasoning="no data", metadata={"abstained": True})
+                return Signal(model_name=name, ticker=ticker, date=date, value=v, reasoning=f"{name} on {ticker}",
+                              metadata={"signal": "bullish" if v > 0 else "bearish", "confidence": abs(v) * 100,
+                                        "abstained": False})
+        return Fake
+
+    seen = []
+
+    class Client:
+        def __enter__(self):
+            seen.append("open")
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(run, "apply_credentials", lambda: None)
+    monkeypatch.setattr(run, "ensure_mandates_dir", lambda: tmp_path)
+    monkeypatch.setattr(run, "make_raw_client", Client)
+    monkeypatch.setattr(run, "CachedDataClient", lambda client: client)
+    monkeypatch.setitem(run.ALPHA_MODEL_REGISTRY, "alpha", analyst("alpha", {"AAA": 0.8, "BBB": -0.6}))
+    monkeypatch.setitem(run.ALPHA_MODEL_REGISTRY, "beta", analyst("beta", {"AAA": 0.4}))
+    out = tmp_path / "signals.json"
+    _main(monkeypatch, "signals", "--universe", "AAA,BBB", "--analysts", "alpha,beta",
+          "--date", "2026-10-06", "--out", str(out))
+    result = json.loads(capsys.readouterr().out)
+    assert result == json.loads(out.read_text())
+    assert result["date"] == "2026-10-06" and seen == ["open"]
+    assert result["tickers"]["AAA"]["panel"] == 60.0          # (0.8 + 0.4) / 2 x 100
+    assert result["tickers"]["BBB"]["panel"] == -60.0         # beta abstained, not counted as neutral
+    assert [s["abstained"] for s in result["tickers"]["BBB"]["signals"]] == [False, True]
+
+
+def test_signals_rejects_an_unknown_analyst(tmp_path, monkeypatch):
+    monkeypatch.setattr(run, "apply_credentials", lambda: None)
+    monkeypatch.setattr(run, "ensure_mandates_dir", lambda: tmp_path)
+    monkeypatch.setattr(run, "make_raw_client", Mock(side_effect=AssertionError("no clients before validation")))
+    with pytest.raises(SystemExit) as exc:
+        _main(monkeypatch, "signals", "--universe", "AAA", "--analysts", "buffett,soros")
+    assert exc.value.code == 2
