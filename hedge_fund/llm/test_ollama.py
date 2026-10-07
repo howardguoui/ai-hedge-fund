@@ -21,6 +21,10 @@ def test_make_llm_points_at_the_local_server(monkeypatch):
     assert chat.model_name == "qwen3:8b"
     assert str(chat.openai_api_base).rstrip("/") == "http://127.0.0.1:11434/v1"
     assert chat.request_timeout == 300  # local models get more time, but a bounded amount
+    payload = chat._get_request_payload([("user", "hi")])
+    # the openai SDK merges extra_body into the JSON body: Ollama ignores max_completion_tokens
+    assert payload["extra_body"] == {"max_tokens": 4096}
+    assert "max_completion_tokens" not in payload and "temperature" not in payload
     monkeypatch.setenv("OLLAMA_TIMEOUT", "90")
     chat = make_llm("ollama/qwen3:8b", timeout=30)._chat
     assert chat.request_timeout == 90

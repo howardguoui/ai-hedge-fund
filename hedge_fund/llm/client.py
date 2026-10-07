@@ -282,9 +282,14 @@ def make_llm(
         from langchain_openai import ChatOpenAI
         base = (os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
         local_timeout = float(os.getenv("OLLAMA_TIMEOUT") or 300)
+        # Two Ollama specifics. langchain-openai sends the cap as
+        # max_completion_tokens, which Ollama's /v1 ignores, so pass it as
+        # max_tokens in the body or generation never stops. And no
+        # temperature: the model's own defaults apply (qwen3 ships
+        # temperature 0.6 / top_p 0.95; greedy decoding makes it repeat itself).
         chat = ChatOpenAI(model=model.removeprefix(OLLAMA_PREFIX), api_key="ollama",
                           base_url=f"{base}/v1", timeout=max(timeout, local_timeout),
-                          max_retries=1, max_tokens=max_tokens, temperature=0)
+                          max_retries=1, extra_body={"max_tokens": max_tokens})
     elif provider == "Kimi":
         # Moonshot speaks the OpenAI wire format. Default to the international
         # host; mainland users override with MOONSHOT_BASE_URL (v1 does the same).
