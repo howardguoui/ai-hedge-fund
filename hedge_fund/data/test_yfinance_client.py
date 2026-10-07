@@ -25,7 +25,7 @@ class FakeTicker:
     def __init__(self, symbol="TEST", empty_prices=False):
         self.symbol = symbol
         self._empty = empty_prices
-        quarter = {"Total Revenue": [100.0] * 6, "Gross Profit": [60.0] * 6, "Operating Income": [30.0] * 6,
+        quarter = {"Total Revenue": [130.0, 100.0, 100.0, 100.0, 100.0, 100.0], "Gross Profit": [60.0] * 6, "Operating Income": [30.0] * 6,
                    "Net Income": [20.0] * 6, "Diluted EPS": [0.2] * 6}
         self.quarterly_income_stmt = _frame(quarter, Q)
         self.quarterly_balance_sheet = _frame({"Stockholders Equity": [800.0] * 6, "Total Debt": [400.0] * 6,
@@ -33,11 +33,11 @@ class FakeTicker:
                                                "Current Liabilities": [150.0] * 6,
                                                "Ordinary Shares Number": [100.0] * 6}, Q)
         self.quarterly_cashflow = _frame({"Free Cash Flow": [10.0] * 6}, Q)
-        self.income_stmt = _frame({"Total Revenue": [400.0, 320.0, 250.0, 200.0],
-                                   "Gross Profit": [240.0, 190.0, 150.0, 120.0],
-                                   "Operating Income": [120.0, 90.0, 70.0, 50.0],
-                                   "Net Income": [80.0, 60.0, 45.0, 30.0],
-                                   "Diluted EPS": [0.8, 0.6, 0.45, 0.3]}, FY)
+        self.income_stmt = _frame({"Total Revenue": [400.0, 320.0, 250.0, 200.0, float("nan")],
+                                   "Gross Profit": [240.0, 190.0, 150.0, 120.0, float("nan")],
+                                   "Operating Income": [120.0, 90.0, 70.0, 50.0, float("nan")],
+                                   "Net Income": [80.0, 60.0, 45.0, 30.0, float("nan")],
+                                   "Diluted EPS": [0.8, 0.6, 0.45, 0.3, float("nan")]}, FY + [pd.Timestamp("2021-12-31")])
         self.balance_sheet = _frame({"Stockholders Equity": [800.0, 700.0, 600.0, 500.0],
                                      "Total Debt": [400.0] * 4, "Ordinary Shares Number": [100.0] * 4}, FY)
         self.cashflow = _frame({"Free Cash Flow": [40.0, 30.0, 20.0, 10.0]}, FY)
@@ -93,12 +93,17 @@ def test_ttm_rows_sum_four_quarters_then_fill_with_fiscal_years():
     assert periods == ["2026-06-30", "2026-03-31", "2025-12-31", "2024-12-31", "2023-12-31", "2022-12-31"]
     latest = rows[0]
     assert latest.period == "ttm"
-    assert latest.gross_margin == pytest.approx(0.6) and latest.net_margin == pytest.approx(0.2)
+    assert latest.gross_margin == pytest.approx(240 / 430) and latest.net_margin == pytest.approx(80 / 430)
     assert latest.earnings_per_share == pytest.approx(0.8)
+    # no TTM a year earlier: latest quarter (130) vs the same quarter a year before (100)
+    assert latest.revenue_growth == pytest.approx(0.3)
+    assert rows[1].revenue_growth == pytest.approx(0.0)    # Q1 2026 vs Q1 2025: 100 vs 100
+    assert rows[2].revenue_growth == pytest.approx(0.25)   # TTM 2025 (400) vs fiscal 2024 (320)
     assert latest.return_on_equity == pytest.approx(80 / 800)
     assert latest.debt_to_equity == pytest.approx(0.5) and latest.current_ratio == pytest.approx(2.0)
     assert latest.book_value_per_share == pytest.approx(8.0)
     assert latest.market_cap == pytest.approx(1000.0) and latest.price_to_earnings_ratio == pytest.approx(12.5)
+    assert "2021-12-31" not in periods  # Yahoo's empty padding year is dropped
     # 2026-06-30 TTM revenue 400 vs the 2025-06-30 period (none) -> growth from the nearest year-earlier row
     fy2024 = next(r for r in rows if r.report_period == "2024-12-31")
     assert fy2024.revenue_growth == pytest.approx(320 / 250 - 1)

@@ -249,15 +249,24 @@ class YFinanceClient:
             if not 250 <= (_day(window[0]) - _day(window[3])).days <= 300:
                 continue  # a missing quarter: not four in a row
             end = _day(window[0])
-            out.append({"end": end, "annual": False, **flows(qi, qc, window), **balance(qb, window[0]),
-                        "filed": self._filing_date(end, reports, annual=False)})
+            row = {"end": end, "annual": False, **flows(qi, qc, window), **balance(qb, window[0]),
+                   "filed": self._filing_date(end, reports, annual=False)}
+            # Yahoo rarely has the 8 quarters a TTM-vs-TTM growth rate needs; the latest quarter
+            # against the same quarter a year earlier is the closest honest substitute.
+            if i + 4 < len(qcols) and 340 <= (_day(qcols[i]) - _day(qcols[i + 4])).days <= 390:
+                rev = _row(qi, *REVENUE)
+                row["yoy_revenue_growth"] = _ratio(_at(rev, qcols[i]), _at(rev, qcols[i + 4]))
+            out.append(row)
         oldest = min((p["end"] for p in out), default=None)
         for col in _cols(ai):
             end = _day(col)
             if oldest is not None and end >= oldest - timedelta(days=30):
                 continue  # already covered by a quarterly TTM row
-            out.append({"end": end, "annual": True, **flows(ai, ac, [col]), **balance(ab, col),
-                        "filed": self._filing_date(end, reports, annual=True)})
+            row = {"end": end, "annual": True, **flows(ai, ac, [col]), **balance(ab, col),
+                   "filed": self._filing_date(end, reports, annual=True)}
+            if row["revenue"] is None and row["net"] is None:
+                continue  # Yahoo pads the annual table with an empty oldest year
+            out.append(row)
         out.sort(key=lambda p: p["end"], reverse=True)
         return out
 
@@ -284,8 +293,7 @@ class YFinanceClient:
             return_on_assets=_ratio(p.get("net"), p.get("assets")),
             debt_to_equity=_ratio(p.get("debt"), p.get("equity")),
             current_ratio=_ratio(p.get("cur_assets"), p.get("cur_liab")),
-            revenue_growth=(_ratio(p.get("revenue"), prior.get("revenue")) - 1
-                            if prior and _ratio(p.get("revenue"), prior.get("revenue")) is not None else None),
+            revenue_growth=_growth(p, prior),
             earnings_per_share_growth=(_ratio(eps, prior.get("eps")) - 1
                                        if prior and prior.get("eps") and eps is not None and prior["eps"] > 0
                                        else None),
@@ -436,6 +444,16 @@ class YFinanceClient:
             if len(out) >= limit:
                 break
         return out
+
+
+def _growth(p: dict, prior: dict | None) -> float | None:
+    """TTM revenue vs the TTM a year earlier; else the latest quarter vs a year earlier."""
+    if prior:
+        r = _ratio(p.get("revenue"), prior.get("revenue"))
+        if r is not None:
+            return r - 1
+    yoy = p.get("yoy_revenue_growth")
+    return yoy - 1 if yoy is not None else None
 
 
 def _calendar_quarter_end_before(day: date) -> date:
