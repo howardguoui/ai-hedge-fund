@@ -57,7 +57,7 @@ export HEDGE_FUND_LLM_MODEL=ollama/qwen3:8b # any Ollama model: ollama/<name>
 aihf
 ```
 
-`OLLAMA_BASE_URL` points at a different Ollama server. The trade-offs, in short: Yahoo has about five
+`OLLAMA_BASE_URL` points at a different Ollama server and `OLLAMA_TIMEOUT` (seconds, default 300) bounds each local call. Start the server with room to think (`OLLAMA_CONTEXT_LENGTH=16384 ollama serve`): reasoning models such as qwen3 can overrun Ollama's default 4096-token context and then run on until the timeout. The trade-offs, in short: Yahoo has about five
 quarters and four fiscal years of statements (so snapshots hold 4-6 periods, not 20) and no SEC filing
 dates (the earnings-report date stands in), so long backtests are less point-in-time than with
 Financial Datasets. A small local model also reasons less well than a frontier model. See

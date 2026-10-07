@@ -13,14 +13,17 @@ def test_ollama_prefix_routes_to_ollama_without_a_key():
 
 
 def test_make_llm_points_at_the_local_server(monkeypatch):
-    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OLLAMA_TIMEOUT"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/")
     llm = make_llm("ollama/qwen3:8b", timeout=30)
     chat = llm._chat if hasattr(llm, "_chat") else llm.chat
     assert chat.model_name == "qwen3:8b"
     assert str(chat.openai_api_base).rstrip("/") == "http://127.0.0.1:11434/v1"
-    assert chat.request_timeout >= 600  # local models get a long timeout
+    assert chat.request_timeout == 300  # local models get more time, but a bounded amount
+    monkeypatch.setenv("OLLAMA_TIMEOUT", "90")
+    chat = make_llm("ollama/qwen3:8b", timeout=30)._chat
+    assert chat.request_timeout == 90
 
 
 def test_think_blocks_are_ignored_when_parsing():

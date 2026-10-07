@@ -274,12 +274,16 @@ def make_llm(
         chat = ChatXAI(model=model, api_key=api_key, timeout=timeout,
                        max_retries=1)
     elif provider == "Ollama":
-        # Ollama speaks the OpenAI wire format at /v1. Local models are slow
-        # on a single consumer GPU, so allow a long timeout.
+        # Ollama speaks the OpenAI wire format at /v1. Local models are slower
+        # than hosted ones, so allow more time (OLLAMA_TIMEOUT seconds, default
+        # 300) -- but not unbounded: a request that overflows the server's
+        # context can run on, and a timeout makes that analyst abstain instead
+        # of stalling the whole run.
         from langchain_openai import ChatOpenAI
         base = (os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+        local_timeout = float(os.getenv("OLLAMA_TIMEOUT") or 300)
         chat = ChatOpenAI(model=model.removeprefix(OLLAMA_PREFIX), api_key="ollama",
-                          base_url=f"{base}/v1", timeout=max(timeout, 600.0),
+                          base_url=f"{base}/v1", timeout=max(timeout, local_timeout),
                           max_retries=1, max_tokens=max_tokens, temperature=0)
     elif provider == "Kimi":
         # Moonshot speaks the OpenAI wire format. Default to the international
