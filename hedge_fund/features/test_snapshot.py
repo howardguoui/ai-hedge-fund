@@ -246,3 +246,21 @@ def test_blind_render_is_opt_in():
     snap = build_snapshot("TEST", "2025-01-15", MockDataClient(metrics=_history()))
     assert snap.render() == snap.render(blind=False)
     assert "Company: TEST" in snap.render()
+
+
+def test_growth_uses_report_dates_when_rows_are_not_quarter_spaced():
+    # A Yahoo-style history: quarterly ttm rows first, then fiscal years.
+    metrics = [_metric(p) for p in ("2026-06-30", "2026-03-31", "2025-12-31", "2024-12-31", "2023-12-31")]
+    for m, bvps, eps in zip(metrics, (16.0, 15.0, 14.0, 12.0, 10.0), (4.0, 3.5, 3.0, 2.0, 1.0)):
+        m.book_value_per_share, m.earnings_per_share = bvps, eps
+    snap = build_snapshot("TEST", "2026-08-15", MockDataClient(metrics=metrics))
+    # 10 -> 16 over two and a half years, not over the one year that five rows would imply
+    assert snap.bvps_cagr == pytest.approx(1.6 ** (1 / 2.5) - 1, abs=1e-4)
+    # No row sits a year before 2026-06-30, so there is no year-on-year figure (not row 4, 2023)
+    assert snap.eps_growth_yoy is None
+
+    # Fiscal years only: the year-ago row is the next one, not four rows back
+    annual = [_metric(p) for p in ("2025-12-31", "2024-12-31", "2023-12-31", "2022-12-31")]
+    for m, eps in zip(annual, (3.0, 2.0, 1.5, 1.0)):
+        m.earnings_per_share = eps
+    assert build_snapshot("TEST", "2026-03-15", MockDataClient(metrics=annual)).eps_growth_yoy == pytest.approx(0.5)
