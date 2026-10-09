@@ -176,3 +176,52 @@ def test_factory_reads_hedge_fund_data(monkeypatch):
     monkeypatch.setenv("HEDGE_FUND_DATA", "yahoo")
     with pytest.raises(ValueError):
         data_source()
+
+
+class ForeignTicker(FakeTicker):
+    """A TSM-like filer: statements in TWD, one listed receipt stands for five ordinary shares."""
+
+    def __init__(self, symbol="ADR", rate=0.05):
+        super().__init__(symbol)
+        self._rate = rate
+        # market cap / price = 20 listed shares, against 100 ordinary shares on the balance sheet
+        self.info = {**self.info, "currency": "USD", "financialCurrency": "TWD",
+                     "currentPrice": 10.0, "marketCap": 200.0}
+
+    def history(self, start=None, end=None, period=None, **kwargs):
+        df = super().history(start=start, end=end, period=period, **kwargs)
+        if self.symbol == "TWDUSD=X":
+            return df.assign(Close=self._rate) if self._rate else pd.DataFrame()
+        return df
+
+
+def test_foreign_filer_is_valued_in_trading_currency_per_listed_share():
+    latest = YFinanceClient(ticker_factory=ForeignTicker).get_financial_metrics("ADR", "2026-10-06")[0]
+    # TTM net 80 TWD -> 4 USD over 20 listed shares = 0.20 USD a share; the price is 10 USD
+    assert latest.currency == "USD"
+    assert latest.earnings_per_share == pytest.approx(0.2)
+    assert latest.price_to_earnings_ratio == pytest.approx(50.0)   # not 10 / 0.8 TWD = 12.5
+    assert latest.market_cap == pytest.approx(200.0)
+    assert latest.book_value_per_share == pytest.approx(2.0) and latest.price_to_book_ratio == pytest.approx(5.0)
+    assert latest.price_to_sales_ratio == pytest.approx(200 / (430 * 0.05))
+    assert latest.free_cash_flow_yield == pytest.approx(40 * 0.05 / 200)
+    # ratios inside one currency do not move
+    assert latest.net_margin == pytest.approx(80 / 430) and latest.return_on_equity == pytest.approx(0.1)
+
+
+def test_foreign_filer_without_an_exchange_rate_has_no_price_ratios():
+    c = YFinanceClient(ticker_factory=lambda s: ForeignTicker(s, rate=None))
+    latest = c.get_financial_metrics("ADR", "2026-10-06")[0]
+    assert latest.price_to_earnings_ratio is None and latest.price_to_sales_ratio is None
+    assert latest.earnings_per_share is None and latest.currency == "TWD"
+    assert latest.net_margin == pytest.approx(80 / 430)
+
+
+def test_market_cap_counts_every_share_class():
+    class TwoClasses(FakeTicker):
+        def __init__(self, symbol="TEST"):
+            super().__init__(symbol)
+            # sharesOutstanding is one class (100); market cap / price says 300 shares in all
+            self.info = {**self.info, "currentPrice": 10.0, "marketCap": 3000.0}
+
+    assert YFinanceClient(ticker_factory=TwoClasses).get_market_cap("TEST", "2026-10-06") == pytest.approx(3000.0)

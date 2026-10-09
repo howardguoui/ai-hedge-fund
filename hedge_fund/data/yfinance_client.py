@@ -9,6 +9,10 @@ What it promises compared with the Financial Datasets client:
   statements. Trailing-twelve-month rows are summed from four consecutive quarters where
   they exist, then fiscal years fill in older periods, so a snapshot usually holds 4-6
   periods instead of up to 20.
+- Foreign filers (TSM, NVO, BABA): statements are in the home currency and the listed share
+  may be a receipt for several ordinary shares. Market cap, per-share values and the price
+  ratios are converted to the trading currency and the listed share (see ``_listing``), using
+  the exchange rate on the filing date. If Yahoo has no rate, those fields are None.
 - Point in time: Yahoo has no SEC filing dates. ``filing_date`` is the company's earnings
   report date for that period when Yahoo lists one, otherwise the period end plus 45 days
   (quarter) or 75 days (fiscal year), about the SEC deadlines. Restated figures replace the
@@ -270,22 +274,60 @@ class YFinanceClient:
         out.sort(key=lambda p: p["end"], reverse=True)
         return out
 
-    def _metrics(self, ticker: str, p: dict, prior: dict | None, currency: str | None) -> FinancialMetrics:
+    def _listing(self, ticker: str, stated_shares: float | None) -> tuple[str | None, str | None, float]:
+        """(trading currency, statement currency, statement shares per listed share).
+
+        A foreign filer reports in its home currency and may list a receipt that stands for
+        several ordinary shares (TSM: statements in TWD, one ADR = five shares). Yahoo's market
+        cap over its price is the share count in listed units; the balance-sheet count over that
+        is the receipt ratio. Within 20% the two are the same share (buybacks, timing).
+        """
+        info = self._info(ticker)
+        price = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
+        per_listed = _ratio(stated_shares, _ratio(_num(info.get("marketCap")), price))
+        if per_listed is None or 0.8 <= per_listed <= 1.25:
+            per_listed = 1.0
+        return info.get("currency"), info.get("financialCurrency"), per_listed
+
+    def _fx(self, statement: str | None, trading: str | None, day: date) -> float | None:
+        """Trading-currency value of one unit of statement currency on ``day``; None if unknown."""
+        if not statement or not trading or statement == trading:
+            return 1.0
+        try:
+            return self._close_on(f"{statement}{trading}=X", day)
+        except YFinanceError:
+            return None
+
+    def _metrics(self, ticker: str, p: dict, prior: dict | None,
+                 listing: tuple[str | None, str | None, float]) -> FinancialMetrics:
+        trading, statement, per_listed = listing
         price = self._close_on(ticker, p["filed"])
-        shares, eps = p.get("shares"), p.get("eps")
-        if eps is None:
-            eps = _ratio(p.get("net"), shares)
+        fx = self._fx(statement, trading, p["filed"])
+        as_listed = fx == 1.0 and per_listed == 1.0  # statements already in the listed share's units
+
+        def money(value: float | None) -> float | None:
+            """A statement amount in the trading currency (None when the rate is unknown)."""
+            return None if value is None or fx is None else value * fx
+
+        stated_eps = p.get("eps")
+        if stated_eps is None:
+            stated_eps = _ratio(p.get("net"), p.get("shares"))
+        shares = p["shares"] / per_listed if p.get("shares") else None
+        # Yahoo's EPS line is in statement currency and, for a receipt, in Yahoo's own choice of
+        # unit, so per-share values of a foreign filer are rebuilt from totals and listed shares.
+        eps = stated_eps if as_listed else _ratio(money(p.get("net")), shares)
         market_cap = price * shares if price is not None and shares else None
-        bvps = _ratio(p.get("equity"), shares)
-        fcfps = _ratio(p.get("fcf"), shares)
+        bvps = _ratio(money(p.get("equity")), shares)
+        fcfps = _ratio(money(p.get("fcf")), shares)
         return FinancialMetrics(
-            ticker=ticker, report_period=p["end"].isoformat(), period="ttm", currency=currency,
+            ticker=ticker, report_period=p["end"].isoformat(), period="ttm",
+            currency=trading if trading and fx is not None else statement,
             filing_date=p["filed"].isoformat(),
             market_cap=market_cap,
             price_to_earnings_ratio=_ratio(price, eps),
             price_to_book_ratio=_ratio(price, bvps),
-            price_to_sales_ratio=_ratio(market_cap, p.get("revenue")),
-            free_cash_flow_yield=_ratio(p.get("fcf"), market_cap),
+            price_to_sales_ratio=_ratio(market_cap, money(p.get("revenue"))),
+            free_cash_flow_yield=_ratio(money(p.get("fcf")), market_cap),
             gross_margin=_ratio(p.get("gross"), p.get("revenue")),
             operating_margin=_ratio(p.get("operating"), p.get("revenue")),
             net_margin=_ratio(p.get("net"), p.get("revenue")),
@@ -294,8 +336,9 @@ class YFinanceClient:
             debt_to_equity=_ratio(p.get("debt"), p.get("equity")),
             current_ratio=_ratio(p.get("cur_assets"), p.get("cur_liab")),
             revenue_growth=_growth(p, prior),
-            earnings_per_share_growth=(_ratio(eps, prior.get("eps")) - 1
-                                       if prior and prior.get("eps") and eps is not None and prior["eps"] > 0
+            # growth compares Yahoo's EPS line with itself, so it stays in statement currency
+            earnings_per_share_growth=(_ratio(stated_eps, prior.get("eps")) - 1
+                                       if prior and prior.get("eps") and stated_eps is not None and prior["eps"] > 0
                                        else None),
             earnings_per_share=eps,
             book_value_per_share=bvps,
@@ -310,13 +353,13 @@ class YFinanceClient:
         if period == "annual":
             periods = [p for p in periods if p["annual"]]
         cutoff = date.fromisoformat(end_date[:10])
-        currency = (self._info(ticker) or {}).get("financialCurrency")
+        listing = self._listing(ticker, next((p["shares"] for p in periods if p.get("shares")), None))
         rows = []
         for p in periods:
             if p["filed"] > cutoff:
                 continue
             prior = next((q for q in periods if 330 <= (p["end"] - q["end"]).days <= 400), None)
-            rows.append(self._metrics(ticker, p, prior, currency))
+            rows.append(self._metrics(ticker, p, prior, listing))
             if len(rows) >= limit:
                 break
         return rows
@@ -343,7 +386,10 @@ class YFinanceClient:
 
     def get_market_cap(self, ticker: str, end_date: str) -> float | None:
         info = self._info(ticker)
-        shares = _num(info.get("sharesOutstanding"))
+        # Yahoo's sharesOutstanding counts one share class (Alphabet: class A only); its market
+        # cap over its price counts them all, in listed units.
+        now = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
+        shares = _ratio(_num(info.get("marketCap")), now) or _num(info.get("sharesOutstanding"))
         price = self._close_on(ticker, date.fromisoformat(end_date[:10]))
         if shares and price:
             return shares * price
