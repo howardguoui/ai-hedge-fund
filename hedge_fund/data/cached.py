@@ -115,6 +115,11 @@ class CachedDataClient:
 
     def _key(self, method: str, params: dict) -> str:
         canonical = json.dumps(params, sort_keys=True)
+        # A non-default source (e.g. yfinance) keys its own entries, so its
+        # answers never mix with Financial Datasets' in one cache directory.
+        namespace = getattr(self._client, "cache_namespace", "")
+        if namespace:
+            method = f"{namespace}:{method}"
         return hashlib.sha256(f"{method}|{canonical}".encode()).hexdigest()[:24]
 
     def _read(self, key: str) -> dict | None:

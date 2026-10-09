@@ -66,8 +66,9 @@ class FundamentalsSnapshot(BaseModel):
     bvps_cagr: float | None = None
     debt_to_equity_latest: float | None = None
     market_cap_latest: float | None = None
-    # t-0 EPS versus t-4 (one year of quarter-spaced ttm rows). None when
-    # either print is missing or the year-ago EPS is not positive.
+    # t-0 EPS versus the period a year earlier (t-4 when rows are
+    # quarter-spaced). None when there is no such period, either print is
+    # missing or the year-ago EPS is not positive.
     eps_growth_yoy: float | None = None
     # Size as a market-cap percentile of US stocks (steps of 5) as of the t-0
     # filing. Set only when build_snapshot is given a breakpoints table; None
@@ -226,7 +227,7 @@ def build_snapshot(
         roe_avg=_avg([m.return_on_equity for m in metrics]),
         net_margin_avg=_avg([m.net_margin for m in metrics]),
         gross_margin_trend=_trend([m.gross_margin for m in metrics]),
-        bvps_cagr=_cagr([m.book_value_per_share for m in metrics]),
+        bvps_cagr=_cagr([(m.report_period, m.book_value_per_share) for m in metrics]),
         debt_to_equity_latest=metrics[0].debt_to_equity,
         market_cap_latest=metrics[0].market_cap,
         eps_growth_yoy=_eps_growth_yoy(rows),
@@ -257,11 +258,14 @@ def _per_share_index(value: float | None, base: float | None) -> str:
 
 
 def _eps_growth_yoy(periods: list[PeriodFundamentals]) -> float | None:
-    """t-0 EPS versus t-4. None when either is missing or t-4 EPS is not positive."""
-    if len(periods) < 5:
-        return None
+    """t-0 EPS versus the period a year earlier (t-4 when rows are quarter-spaced).
+
+    None when there is no such period, either EPS is missing, or the year-ago EPS is not positive.
+    """
+    year_ago = next((p for p in periods[1:]
+                     if 11 <= _months_between(periods[0].report_period, p.report_period) <= 13), None)
     latest = periods[0].earnings_per_share
-    prior = periods[4].earnings_per_share
+    prior = year_ago.earnings_per_share if year_ago else None
     if latest is None or prior is None or prior <= 0:
         return None
     return round(latest / prior - 1, 4)
@@ -288,12 +292,22 @@ def _trend(values: list[float | None]) -> float | None:
     return round(xs[0] - xs[-1], 4) if len(xs) >= 2 else None
 
 
-def _cagr(values: list[float | None]) -> float | None:
-    """Annualized growth from oldest to latest (ttm rows are quarter-spaced)."""
-    xs = [v for v in values if v is not None]
-    if len(xs) < 2 or xs[-1] is None or xs[-1] <= 0 or xs[0] <= 0:
+def _months_between(newer: str, older: str) -> int:
+    """Whole months from one report period to a later one (both are ISO dates)."""
+    return (int(newer[:4]) - int(older[:4])) * 12 + int(newer[5:7]) - int(older[5:7])
+
+
+def _cagr(points: list[tuple[str, float | None]]) -> float | None:
+    """Annualized growth from the oldest to the latest (report_period, value), newest first.
+
+    The time comes from the report dates, not from the row count: rows are
+    quarter-spaced from Financial Datasets, but Yahoo's history is a few
+    quarterly ttm rows followed by fiscal years.
+    """
+    xs = [(period, v) for period, v in points if v is not None]
+    if len(xs) < 2 or xs[-1][1] <= 0 or xs[0][1] <= 0:
         return None
-    years = (len(xs) - 1) / 4  # quarter-spaced ttm periods
+    years = _months_between(xs[0][0], xs[-1][0]) / 12
     if years <= 0:
         return None
-    return round((xs[0] / xs[-1]) ** (1 / years) - 1, 4)
+    return round((xs[0][1] / xs[-1][1]) ** (1 / years) - 1, 4)

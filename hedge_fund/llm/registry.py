@@ -27,10 +27,18 @@ PROVIDER_ENV_VARS = {
     "TypeSafe": "TYPESAFE_API_KEY",
 }
 
+# Providers that need no API key: local models served by Ollama (https://ollama.com).
+KEYLESS_PROVIDERS = frozenset({"Ollama"})
+
+# Any model id with this prefix runs on the local Ollama server, e.g.
+# "ollama/qwen3:8b" -> model "qwen3:8b" at OLLAMA_BASE_URL (default
+# http://localhost:11434). No registry entry needed per local model.
+OLLAMA_PREFIX = "ollama/"
+
 # Providers v2 has a client for (see client.py:make_llm). Anything in the
 # registry but missing here is shown in the picker and not selectable — better
 # a greyed row than a run that dies on an id the transport rejects.
-SUPPORTED_PROVIDERS = frozenset(PROVIDER_ENV_VARS)
+SUPPORTED_PROVIDERS = frozenset(PROVIDER_ENV_VARS) | KEYLESS_PROVIDERS
 
 _FALLBACK = ("Opus 5.5", "claude-opus-5-5", "Anthropic")
 
@@ -53,6 +61,8 @@ def load_api_models() -> list[tuple[str, str, str]]:
 def provider_for(model_id: str) -> str | None:
     """Which provider serves a model id. None if it is not in the registry —
     a hand-exported HEDGE_FUND_LLM_MODEL should not be second-guessed."""
+    if model_id.startswith(OLLAMA_PREFIX):
+        return "Ollama"
     return next((prov for _, mid, prov in load_api_models() if mid == model_id),
                 None)
 

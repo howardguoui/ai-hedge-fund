@@ -29,6 +29,7 @@ from hedge_fund.llm import contract
 from hedge_fund.llm.registry import (
     env_var_for,
     is_supported,
+    OLLAMA_PREFIX,
     provider_for,
     SUPPORTED_PROVIDERS,
 )
@@ -246,7 +247,7 @@ def make_llm(
             f"Supported: {', '.join(sorted(SUPPORTED_PROVIDERS))}."
         )
 
-    api_key = _require_key(provider)
+    api_key = None if provider == "Ollama" else _require_key(provider)
 
     if provider == "TypeSafe":
         # Typed judgments have no generated tokens or output-token budget.
@@ -272,6 +273,23 @@ def make_llm(
         from langchain_xai import ChatXAI
         chat = ChatXAI(model=model, api_key=api_key, timeout=timeout,
                        max_retries=1)
+    elif provider == "Ollama":
+        # Ollama speaks the OpenAI wire format at /v1. Local models are slower
+        # than hosted ones, so allow more time (OLLAMA_TIMEOUT seconds, default
+        # 300) -- but not unbounded: a request that overflows the server's
+        # context can run on, and a timeout makes that analyst abstain instead
+        # of stalling the whole run.
+        from langchain_openai import ChatOpenAI
+        base = (os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434").rstrip("/")
+        local_timeout = float(os.getenv("OLLAMA_TIMEOUT") or 300)
+        # Two Ollama specifics. langchain-openai sends the cap as
+        # max_completion_tokens, which Ollama's /v1 ignores, so pass it as
+        # max_tokens in the body or generation never stops. And no
+        # temperature: the model's own defaults apply (qwen3 ships
+        # temperature 0.6 / top_p 0.95; greedy decoding makes it repeat itself).
+        chat = ChatOpenAI(model=model.removeprefix(OLLAMA_PREFIX), api_key="ollama",
+                          base_url=f"{base}/v1", timeout=max(timeout, local_timeout),
+                          max_retries=1, extra_body={"max_tokens": max_tokens})
     elif provider == "Kimi":
         # Moonshot speaks the OpenAI wire format. Default to the international
         # host; mainland users override with MOONSHOT_BASE_URL (v1 does the same).
@@ -336,6 +354,9 @@ def extract_json(text: str) -> dict:
     Tries: ```json fence -> whole string -> first balanced {...} block.
     Raises LLMParseError if nothing parses.
     """
+    # Reasoning models served locally (qwen3, deepseek-r1 on Ollama) put
+    # their thinking inside <think>...</think>; braces in there are not the answer.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence:
         try:

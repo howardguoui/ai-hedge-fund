@@ -31,6 +31,11 @@ Usage::
 
     aihf paper status alpha | list | halt alpha --reason "..." | resume alpha
 
+    aihf signals --universe SOFI,BE,GEV
+        Ask the analysts for their view of each ticker today (or --date) and
+        print the signals plus a panel score per ticker as JSON. No fund, no
+        trades: for feeding another system or a quick read.
+
 A mandate is the desk — strategies, staff, risk, capital, cadence — and
 never names tickers; the universe is fixed when a fund is deployed (paper)
 or given per study (backtest).
@@ -39,6 +44,7 @@ or given per study (backtest).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import date as _date
@@ -48,7 +54,8 @@ from pathlib import Path
 from rich.console import Console
 
 from hedge_fund.backtesting import backtest_fund
-from hedge_fund.data import CachedDataClient, FDClient
+from hedge_fund.data import CachedDataClient
+from hedge_fund.data.factory import data_source, make_raw_client
 from hedge_fund.data.sessions import completed_through
 from hedge_fund.fund import Fund, load_spec, normalize_universe
 from hedge_fund.paper import (
@@ -64,6 +71,7 @@ from hedge_fund.paper import (
 )
 from hedge_fund.paths import ensure_mandates_dir, PAPER_DIR, RESEARCH_DIR
 from hedge_fund.pipeline import FundHalted, SessionRecord
+from hedge_fund.signals import ALPHA_MODEL_REGISTRY
 from hedge_fund.tui.keys import apply_credentials
 from hedge_fund.tui.shared import _BACKTEST_WEEKS
 
@@ -89,6 +97,8 @@ def main() -> None:
     try:
         if args.command == "backtest":
             _backtest(args, parser, console)
+        elif args.command == "signals":
+            _signals(args, parser, console)
         else:
             _paper(args, parser, console)
     except (FundHalted, NothingDue, LedgerError) as exc:
@@ -152,7 +162,22 @@ def _parser() -> argparse.ArgumentParser:
 
     resume = actions.add_parser("resume", help="clear the kill switch")
     resume.add_argument("name")
+
+    signals = commands.add_parser(
+        "signals", help="score tickers now with the analysts (JSON, no trades)",
+        description="Every analyst's view of every ticker as of --date (default: the "
+        "latest completed session), plus a panel score: the mean signed conviction "
+        "x 100 of the analysts that did not abstain (-100 all bearish .. +100 all bullish).",
+    )
+    signals.add_argument("--universe", required=True, help=_UNIVERSE_HELP)
+    signals.add_argument("--analysts", default=",".join(_DEFAULT_PANEL),
+                         help=f"comma separated (default: {','.join(_DEFAULT_PANEL)}); any of the registered alpha models")
+    signals.add_argument("--date", help="as-of date YYYY-MM-DD (default: the latest completed session)")
+    signals.add_argument("--out", help="also write the JSON to this file")
     return parser
+
+
+_DEFAULT_PANEL = ("buffett", "munger", "graham", "lynch", "druckenmiller")
 
 
 _UNIVERSE_HELP = "tickers to trade, comma or space separated, e.g. AAPL,MSFT,NVDA"
@@ -177,6 +202,45 @@ def _fund_dir(name: str, parser: argparse.ArgumentParser) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# signals
+# ---------------------------------------------------------------------------
+
+def panel_score(signals: list[dict]) -> float | None:
+    """Mean signed conviction x 100 over the analysts that formed a view."""
+    views = [s["value"] for s in signals if not s.get("abstained")]
+    return round(sum(views) / len(views) * 100, 1) if views else None
+
+
+def _signals(args, parser: argparse.ArgumentParser, console: Console) -> None:
+    universe = _universe(args.universe, parser)
+    names = [n.strip().lower() for n in args.analysts.split(",") if n.strip()]
+    unknown = [n for n in names if n not in ALPHA_MODEL_REGISTRY]
+    if not names or unknown:
+        parser.error(f"unknown analyst(s) {unknown}; available: {', '.join(sorted(ALPHA_MODEL_REGISTRY))}")
+    as_of = args.date or completed_through()
+    models = [ALPHA_MODEL_REGISTRY[n]() for n in names]  # live run: prompts are not blinded
+    result = {"date": as_of, "analysts": names, "llm": os.environ.get("HEDGE_FUND_LLM_MODEL"),
+              "data_source": data_source(), "tickers": {}}
+    with make_raw_client() as raw:
+        data = CachedDataClient(raw)
+        for ticker in universe:
+            rows = []
+            for model in models:
+                with console.status(f"[cyan]{model.name} on {ticker} ({as_of})…"):
+                    s = model.predict(ticker, as_of, data)
+                rows.append({"analyst": s.model_name, "value": round(s.value, 4),
+                             "signal": s.metadata.get("signal"), "confidence": s.metadata.get("confidence"),
+                             "abstained": bool(s.metadata.get("abstained")), "reasoning": s.reasoning})
+            score = panel_score(rows)
+            result["tickers"][ticker] = {"panel": score, "signals": rows}
+            console.print(f"{ticker}: panel {score if score is not None else 'n/a'}")
+    text = json.dumps(result, indent=2)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+    print(text)
+
+
+# ---------------------------------------------------------------------------
 # backtest
 # ---------------------------------------------------------------------------
 
@@ -193,7 +257,7 @@ def _backtest(args, parser: argparse.ArgumentParser, console: Console) -> None:
     # did over the window, and that memory would otherwise score as skill.
     fund = Fund(spec, blind=True)
 
-    with FDClient() as raw:
+    with make_raw_client() as raw:
         fd = CachedDataClient(raw)
         with console.status(
             f"[cyan]{spec.name}: backtesting {start} → {end} "
@@ -254,7 +318,7 @@ def _paper(args, parser: argparse.ArgumentParser, console: Console) -> None:
 
     if args.action == "tick":
         deployed = load_deployed(directory)
-        with FDClient() as raw:
+        with make_raw_client() as raw:
             fd = CachedDataClient(raw)
             verb = "running the latest session again" if args.again else "advancing one session"
             with console.status(
